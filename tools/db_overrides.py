@@ -7,8 +7,8 @@ it: units, and the enumeration behind a sensor's error byte. Both matter here
 because Home Assistant builds its entity out of them -- a value with no unit
 gets no device class, no statistics and no place on a dashboard.
 
-Two rules only, both narrow, both verified against the whole database rather
-than guessed:
+Three rules only, all narrow, the first two verified against the whole
+database rather than guessed, the third against a running controller:
 
   * A leaf with no unit whose datapoint name says what it measures gets that
     unit. 131 fields gain one; the 530 that already have one are never
@@ -16,6 +16,10 @@ than guessed:
   * A subfield named `Error` becomes an enumeration over `SensorStates`. All
     twenty datapoints in the database with such a field are named `*Sensor`
     and carry a single byte there, so the rule cannot catch anything else.
+  * The heating curves of the four mixer circuits (880-883) become `rw`.
+    open3e lists them `ro`; a Vitocal 250-A (HPMU 0x680) accepts 0x2E on
+    881, reads the new bytes back and moves the circuit's flow setpoint
+    (988) at once: gradient 0.6 -> 0.7 raised it from 29.9 to 31.6 degC.
 
 Applied in two places that must not drift apart: gen_dpdb.py patches the JSON
 that becomes the firmware's database, and the fixture generators patch the
@@ -38,6 +42,9 @@ UNIT_RULES = [
 NUMERIC = {"O3EInt8", "O3EInt16", "O3EInt32", "O3EInt64",
            "O3EByteVal", "O3EFloat32"}
 
+# MixerOne..FourCircuitCentralHeatingCurve.
+WRITABLE = {"880", "881", "882", "883"}
+
 SENSOR_ERROR_FIELD = "Error"
 SENSOR_ERROR_ENUM = "SensorStates"
 
@@ -57,10 +64,13 @@ def _is_sensor_error(dp_name: str, sub_id: str, codec: str) -> bool:
 
 def apply_to_json(dps: dict) -> dict:
     """Patch Open3Edatapoints.json in place. Returns a count per change."""
-    stats = {"units": 0, "sensor_error": 0}
+    stats = {"units": 0, "sensor_error": 0, "writable": 0}
     for key, dp in dps.items():
         if not (key.isdigit() and isinstance(dp, dict)):
             continue
+        if key in WRITABLE and dp["args"].get("acc") != "rw":
+            dp["args"]["acc"] = "rw"
+            stats["writable"] += 1
         name = dp.get("id", "")
         unit = unit_for(name)
         subs = dp["args"].get("subTypes") if dp["codec"] == "O3EComplexType" else None
