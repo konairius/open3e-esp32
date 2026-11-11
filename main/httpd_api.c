@@ -1272,6 +1272,95 @@ static esp_err_t h_rawwrite(httpd_req_t *r)
     return send_json(r, "{\"ok\": true}");
 }
 
+/* Raw UDS sequence for diagnostics: {"ecu": "0x6c3", "requests": ["1003",
+ * "22075d", "1001"], "timeout": 1000}. Runs the requests back to back under
+ * one bus hold and returns each raw response. Behind the rawWriteEnabled gate,
+ * since a request may change the ECU's state (session control). */
+#define RAWUDS_MAX_STEPS 8
+#define RAWUDS_MAX_REQ   64
+
+static esp_err_t h_rawuds(httpd_req_t *r)
+{
+    sys_cfg_t sys;
+    sys_cfg_get(&sys);
+    if (!sys.raw_write_enabled) {
+        return send_err(r, 403, "raw writing is disabled in the system settings");
+    }
+    char *body = read_body(r);
+    if (!body) {
+        return ESP_OK;
+    }
+    cJSON *j = cJSON_Parse(body);
+    free(body);
+    if (!j) {
+        return send_err(r, 400, "not valid JSON");
+    }
+    const cJSON *jecu = cJSON_GetObjectItem(j, "ecu");
+    const cJSON *jreqs = cJSON_GetObjectItem(j, "requests");
+    int n = cJSON_IsArray(jreqs) ? cJSON_GetArraySize(jreqs) : 0;
+    if ((!cJSON_IsNumber(jecu) && !cJSON_IsString(jecu)) || n < 1 ||
+        n > RAWUDS_MAX_STEPS) {
+        cJSON_Delete(j);
+        return send_err(r, 400, "ecu and 1..8 requests are required");
+    }
+    uint16_t ecu = cJSON_IsNumber(jecu) ? (uint16_t)jecu->valuedouble
+                                        : (uint16_t)strtol(jecu->valuestring, NULL, 0);
+    uint32_t p2_ms = sel_u32(j, "timeout", RAWREAD_P2_MS);
+    if (p2_ms < RAWREAD_P2_MIN_MS) {
+        p2_ms = RAWREAD_P2_MIN_MS;
+    } else if (p2_ms > RAWREAD_P2_MAX_MS) {
+        p2_ms = RAWREAD_P2_MAX_MS;
+    }
+
+    static uint8_t reqs[RAWUDS_MAX_STEPS][RAWUDS_MAX_REQ];
+    can_uds_step_t steps[RAWUDS_MAX_STEPS] = { 0 };
+    uint8_t *resp = malloc((size_t)n * ISOTP_MAX_PAYLOAD);
+    if (!resp) {
+        cJSON_Delete(j);
+        return send_err(r, 500, "out of memory");
+    }
+    for (int i = 0; i < n; i++) {
+        const cJSON *it = cJSON_GetArrayItem(jreqs, i);
+        size_t len = 0;
+        if (!cJSON_IsString(it) ||
+            !hex_to_bytes(it->valuestring, reqs[i], RAWUDS_MAX_REQ, &len) || len < 1) {
+            free(resp);
+            cJSON_Delete(j);
+            return send_err(r, 400, "requests must be non-empty hex strings");
+        }
+        steps[i].req = reqs[i];
+        steps[i].req_len = len;
+        steps[i].resp = resp + (size_t)i * ISOTP_MAX_PAYLOAD;
+        steps[i].resp_sz = ISOTP_MAX_PAYLOAD;
+    }
+    cJSON_Delete(j);
+
+    if (!can_uds_sequence(ecu, steps, (size_t)n, p2_ms)) {
+        free(resp);
+        return send_err(r, 503, "bus not available");
+    }
+
+    o3e_buf_t b;
+    o3e_buf_init(&b);
+    o3e_buf_adds(&b, "{\"responses\": [");
+    for (int i = 0; i < n; i++) {
+        o3e_buf_adds(&b, i ? ", {\"result\": " : "{\"result\": ");
+        o3e_buf_add_json_str(&b, uds_strerror(steps[i].res));
+        o3e_buf_adds(&b, ", \"data\": \"");
+        for (size_t k = 0; k < steps[i].resp_len; k++) {
+            char hx[3];
+            snprintf(hx, sizeof(hx), "%02x", steps[i].resp[k]);
+            o3e_buf_adds(&b, hx);
+        }
+        o3e_buf_adds(&b, "\"}");
+    }
+    o3e_buf_adds(&b, "]}");
+    free(resp);
+    esp_err_t e = send_json(r, b.buf ? b.buf : "{}");
+    o3e_buf_free(&b);
+    return e;
+}
+
 /* ------------------------------------------------------------------ */
 /* CAN trace                                                             */
 
@@ -2523,6 +2612,7 @@ static const httpd_uri_t routes[] = {
     { "/api/crash",       HTTP_DELETE, h_crash,      NULL },
     { "/api/rawread",     HTTP_GET,  h_rawread,      NULL },
     { "/api/rawwrite",    HTTP_POST, h_rawwrite,     NULL },
+    { "/api/rawuds",      HTTP_POST, h_rawuds,       NULL },
     { "/api/trace",       HTTP_POST, h_trace_ctl,    NULL },
     { "/api/trace",       HTTP_GET,  h_trace_status, NULL },
     { "/api/trace/frames", HTTP_GET, h_trace_frames, NULL },

@@ -217,6 +217,59 @@ static void scenario(ecu_mode_t mode, uint8_t nrc, uint16_t did,
     }
 }
 
+/* Session control as a raw request: the ECU answers 0x10 0x03 positively,
+ * anything else with serviceNotSupported. */
+static bool session_neg;
+
+static void *session_ecu(void *arg)
+{
+    (void)arg;
+    isotp_link_t link = { .hal = &hal_ecu, .tx_id = 0x690, .rx_id = 0x680, .stmin_ms = 0 };
+    uint8_t req[16];
+    size_t n = 0;
+    if (isotp_recv(&link, req, sizeof(req), &n, 2000) != ISOTP_OK || n < 1) {
+        return NULL;
+    }
+    if (session_neg) {
+        const uint8_t neg[3] = { UDS_NEGATIVE, req[0], 0x11 };
+        isotp_send(&link, neg, sizeof(neg));
+        return NULL;
+    }
+    const uint8_t pend[3] = { UDS_NEGATIVE, req[0], UDS_NRC_PENDING };
+    isotp_send(&link, pend, sizeof(pend));
+    const uint8_t pos[6] = { (uint8_t)(req[0] + 0x40), req[1], 0x00, 0x32, 0x01, 0xF4 };
+    isotp_send(&link, pos, sizeof(pos));
+    return NULL;
+}
+
+static void raw_scenario(bool neg, const char *label)
+{
+    pthread_mutex_lock(&bus.lock);
+    bus.n = 0;
+    pthread_mutex_unlock(&bus.lock);
+    session_neg = neg;
+    pthread_t th;
+    pthread_create(&th, NULL, session_ecu, NULL);
+
+    isotp_link_t link = { .hal = &hal_tester, .tx_id = 0x680, .rx_id = 0x690, .stmin_ms = 0 };
+    const uint8_t req[2] = { 0x10, 0x03 };
+    uint8_t buf[64];
+    size_t n = 12345;
+    uds_result_t r = uds_raw(&link, req, sizeof(req), buf, sizeof(buf), &n, 400);
+    pthread_join(th, NULL);
+
+    printf("%-44s %s\n", label, uds_strerror(r));
+    if (neg) {
+        check(r.err == UDS_ERR_NEGATIVE && r.nrc == 0x11, "%s: expected NRC 0x11", label);
+        check(n == 3 && buf[0] == UDS_NEGATIVE && buf[1] == 0x10,
+              "%s: negative response not returned raw", label);
+    } else {
+        check(r.err == UDS_OK, "%s: expected OK, got %s", label, uds_strerror(r));
+        check(n == 6 && buf[0] == 0x50 && buf[1] == 0x03,
+              "%s: positive response not returned raw", label);
+    }
+}
+
 int main(void)
 {
     pthread_mutex_init(&bus.lock, NULL);
@@ -233,6 +286,8 @@ int main(void)
              "requestOutOfRange is a failure");
     scenario(ECU_NEGATIVE, 0x22, 300, UDS_ERR_NEGATIVE,
              "conditionsNotCorrect is a failure");
+    raw_scenario(false, "raw 10 03 after responsePending");
+    raw_scenario(true, "raw 10 03 serviceNotSupported");
 
     printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
     return failures ? 1 : 0;

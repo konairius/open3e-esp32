@@ -74,4 +74,10 @@ uds_result_t uds_read_did(const isotp_link_t *link, uint16_t did,
 uds_result_t uds_write_did(const isotp_link_t *link, uint16_t did,
                            const uint8_t *data, size_t len, uint32_t p2_ms);
 
+/* Any single request, for diagnostics (session control, standard identifiers).
+ * Absorbs "response pending" like the others. The raw response, positive or
+ * negative, is returned in `buf`; a negative one also sets UDS_ERR_NEGATIVE. */
+uds_result_t uds_raw(const isotp_link_t *link, const uint8_t *req, size_t req_len,
+                     uint8_t *buf, size_t buf_sz, size_t *out_len, uint32_t p2_ms);
+
 #endif /* O3E_UDS_H */

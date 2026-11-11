@@ -149,3 +149,18 @@ uds_result_t uds_write_did(const isotp_link_t *link, uint16_t did,
     }
     return ok();
 }
+
+uds_result_t uds_raw(const isotp_link_t *link, const uint8_t *req, size_t req_len,
+                     uint8_t *buf, size_t buf_sz, size_t *out_len, uint32_t p2_ms)
+{
+    *out_len = 0;
+    if (req_len < 1) {
+        return fail(UDS_ERR_MALFORMED);
+    }
+    isotp_err_t te = isotp_send(link, req, req_len);
+    if (te != ISOTP_OK) {
+        return fail(map_transport(te));
+    }
+    /* recv_response leaves a negative response in `buf` with its length. */
+    return recv_response(link, (uint8_t)(req[0] + 0x40), buf, buf_sz, out_len, p2_ms);
+}

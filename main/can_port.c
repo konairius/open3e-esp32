@@ -913,6 +913,46 @@ static uds_result_t with_bus(uint16_t ecu_tx, bool is_write, uint16_t did,
     return r;
 }
 
+bool can_uds_sequence(uint16_t ecu_tx, can_uds_step_t *steps, size_t n,
+                      uint32_t p2_ms)
+{
+    if (!running || !bus_lock) {
+        return false;
+    }
+    if (xSemaphoreTake(bus_lock, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        ESP_LOGE(TAG, "uds sequence: bus held by '%s'",
+                 bus_holder[0] ? bus_holder : "?");
+        return false;
+    }
+    snprintf(bus_holder, sizeof(bus_holder), "%s", pcTaskGetName(NULL));
+    bus_taken_ms = hal_now_ms(NULL);
+    flush_rx();
+    rx_want = UDS_RX_OF(ecu_tx);
+    cantrace_own_begin(ecu_tx);
+
+    const isotp_link_t link = {
+        .hal = &twai_hal,
+        .tx_id = ecu_tx,
+        .rx_id = UDS_RX_OF(ecu_tx),
+        .stmin_ms = ISOTP_STMIN_MS,
+    };
+    for (size_t i = 0; i < n; i++) {
+        steps[i].resp_len = 0;
+        steps[i].res = uds_raw(&link, steps[i].req, steps[i].req_len,
+                               steps[i].resp, steps[i].resp_sz,
+                               &steps[i].resp_len, p2_ms ? p2_ms : UDS_P2_MS);
+        ESP_LOGI(TAG, "uds 0x%03X step %u sid 0x%02X: %s", ecu_tx, (unsigned)i,
+                 steps[i].req[0], uds_strerror(steps[i].res));
+    }
+
+    rx_want = RX_WANT_NONE;
+    cantrace_own_end();
+    update_stats();
+    bus_holder[0] = '\0';
+    xSemaphoreGive(bus_lock);
+    return true;
+}
+
 uds_result_t can_read_did(uint16_t ecu_tx, uint16_t did,
                           uint8_t *buf, size_t buf_sz, size_t *out_len,
                           uint32_t p2_ms)

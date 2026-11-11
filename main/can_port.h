@@ -136,6 +136,21 @@ uds_result_t can_read_did(uint16_t ecu_tx, uint16_t did,
 uds_result_t can_write_did(uint16_t ecu_tx, uint16_t did,
                            const uint8_t *data, size_t len, uint32_t p2_ms);
 
+/* A sequence of raw UDS requests to one ECU under a single bus hold, so a
+ * session change and the requests depending on it are not interleaved with
+ * other traffic. Each step gets its own result and raw response. */
+typedef struct {
+    const uint8_t *req;
+    size_t         req_len;
+    uint8_t       *resp;
+    size_t         resp_sz;
+    size_t         resp_len;
+    uds_result_t   res;
+} can_uds_step_t;
+
+bool can_uds_sequence(uint16_t ecu_tx, can_uds_step_t *steps, size_t n,
+                      uint32_t p2_ms);
+
 /* ------------------------------------------------------------------ */
 /* Passive reception                                                    */
 /*
